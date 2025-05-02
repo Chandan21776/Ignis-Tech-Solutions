@@ -1,0 +1,58 @@
+# Airbnb Scraper Setup # First,
+create a new Scrapy project: # scrapy startproject airbnb_scraper # cd airbnb_scraper # scrapy genspider airbnb airbnb.com # Full project structure: # airbnb_scraper/ # ├── scrapy.cfg # ├── airbnb_scraper/ # ├── __init__.py # ├── items.py # ├── middlewares.py # ├── pipelines.py # ├── settings.py # └── spiders/ # ├── __init__.py # └── airbnb.py # airbnb_scraper/items.py import scrapy class AirbnbListingItem(scrapy.Item) : title=scrapy.Field() location=scrapy.Field() address=scrapy.Field() price_per_night=scrapy.Field() currency=scrapy.Field() total_price=scrapy.Field() main_image=scrapy.Field() image_urls=scrapy.Field() ratings=scrapy.Field() description=scrapy.Field() number_of_reviews=scrapy.Field() amenities=scrapy.Field() host=scrapy.Field() property_type=scrapy.Field() # airbnb_scraper/settings.py BOT_NAME='airbnb_scraper' SPIDER_MODULES=['airbnb_scraper.spiders'] NEWSPIDER_MODULE='airbnb_scraper.spiders' # Crawl responsibly by identifying yourself (and your website) on the user-agent USER_AGENT='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36' # Obey robots.txt rules ROBOTSTXT_OBEY=False # Configure maximum concurrent requests CONCURRENT_REQUESTS=8 # Configure a delay for requests for the same website (default: 0) DOWNLOAD_DELAY=1.5 # Enable and configure the AutoThrottle extension AUTOTHROTTLE_ENABLED=True AUTOTHROTTLE_START_DELAY=5 AUTOTHROTTLE_MAX_DELAY=60 AUTOTHROTTLE_TARGET_CONCURRENCY=1.0 AUTOTHROTTLE_DEBUG=False # Enable showing throttling stats for every response received: # AUTOTHROTTLE_DEBUG=False # airbnb_scraper/spiders/airbnb.py import scrapy import json import re import datetime from urllib.parse import urlencode,
+quote_plus import requests from ..items import AirbnbListingItem class AirbnbSpider(scrapy.Spider) : name='airbnb' allowed_domains=['airbnb.com'] # Custom settings for this spider custom_settings= {
+    'FEEDS': {
+        'airbnb_listings.json': {
+            'format': 'json', 'encoding': 'utf8', 'store_empty': False, 'overwrite': True,
+        }
+        ,
+    }
+    ,
+}
+
+def __init__(self, location='New York', check_in=None, check_out=None, guests=2, *args, **kwargs) : super(AirbnbSpider, self).__init__(*args, **kwargs) self.location=location # Handle dates if check_in is None : # Default to tomorrow self.check_in=(datetime.datetime.now() + datetime.timedelta(days=1)).strftime('%Y-%m-%d') else : self.check_in=check_in if check_out is None : # Default to a week after check_in check_in_date=datetime.datetime.strptime(self.check_in, '%Y-%m-%d') self.check_out=(check_in_date + datetime.timedelta(days=7)).strftime('%Y-%m-%d') else : self.check_out=check_out self.guests=int(guests) self.api_endpoint="http://localhost:8000/api/add_listing/" def start_requests(self) : """
+ First we'll make a normal request to the Airbnb search page.
+ From there,
+we can extract the API endpoint and parameters. """
+ # Construct the URL for search results params= {
+    'query': self.location, 'checkin': self.check_in, 'checkout': self.check_out, 'adults': self.guests,
+}
+
+search_url=f'https://www.airbnb.com/s/{quote_plus(self.location)}/homes?{urlencode(params)}' yield scrapy.Request( url=search_url, callback=self.parse_search_results, meta= {
+    'location': self.location, 'check_in': self.check_in, 'check_out': self.check_out, 'guests': self.guests, 'page': 1
+}
+
+) def parse_search_results(self, response) : """
+ Parse search results to extract listing URLs and pagination. There are two approaches : 1. Extract data from the HTML 2. Identify and use the API calls that Airbnb makes We'll use approach #1 first and demonstrate #2 as well.
+ """
+ # Approach 1: Extract listing URLs from HTML listing_cards=response.css('div[itemprop="itemListElement"]') for card in listing_cards : # Extract listing URL listing_url=card.css('a::attr(href)').get() if listing_url and listing_url.startswith('/') : full_listing_url=f'https://www.airbnb.com{listing_url}' yield scrapy.Request( url=full_listing_url, callback=self.parse_listing_details, meta=response.meta) # Handle pagination current_page=response.meta.get('page', 1) next_page=current_page+1 # Limit to 5 pages for demonstration if next_page <=5 : # Construct URL for next page params= {
+    'query': response.meta['location'], 'checkin': response.meta['check_in'], 'checkout': response.meta['check_out'], 'adults': response.meta['guests'], 'page': next_page
+}
+
+next_page_url=f'https://www.airbnb.com/s/{quote_plus(response.meta["location"])}/homes?{urlencode(params)}' yield scrapy.Request( url=next_page_url, callback=self.parse_search_results, meta= {
+    'location': response.meta['location'], 'check_in': response.meta['check_in'], 'check_out': response.meta['check_out'], 'guests': response.meta['guests'], 'page': next_page
+}
+
+) # Approach 2: Identify and use Airbnb API calls (commented out) # This would be a more robust method but requires additional work to identify the API """
+ # Extract API data from embedded JSON script_text=response.css('script#data-state::text').get() if script_text : try : data=json.loads(script_text) listings_data=data.get('niobeClientData', {}
+
+).get('__niobe_denormalized', {}
+
+) for key,
+value in listings_data.items() : if 'listing' in key and isinstance(value, dict) : listing_id=value.get('id') if listing_id : listing_url=f'https://www.airbnb.com/rooms/{listing_id}' yield scrapy.Request( url=listing_url, callback=self.parse_listing_details, meta=response.meta) except json.JSONDecodeError : self.logger.error("Failed to parse JSON data from script") """
+ def parse_listing_details(self, response) : """Parse details from a listing page""" item=AirbnbListingItem() # Extract data from the listing page item['title']=response.css('h1::text').get() item['location']=response.meta['location'] # Extract address (will be partial due to Airbnb's privacy)
+ address=response.css('div[data-section-id="LOCATION_DEFAULT"] span::text').get() item['address']=address if address else None # Extract price price_text=response.css('span[data-testid="listing-price"] span::text').get() if price_text : # Clean up price text (e.g., "$150 night") price_match=re.search(r'(\$|\€|\£)(\d+)', price_text) if price_match : currency_symbol=price_match.group(1) price=float(price_match.group(2)) # Map symbol to code currency_map= {
+    '$': 'USD', '€': 'EUR', '£': 'GBP'
+}
+
+item['currency']=currency_map.get(currency_symbol, 'USD') item['price_per_night']=price else : item['currency']='USD' item['price_per_night']=0 else : item['currency']='USD' item['price_per_night']=0 # Extract total price total_price_text=response.css('span[data-testid="total-price"] span::text').get() if total_price_text : # Clean up total price total_price_match=re.search(r'(\$|\€|\£)(\d+)', total_price_text) if total_price_match : item['total_price']=float(total_price_match.group(2)) else : # Estimate total nights=(datetime.datetime.strptime(response.meta['check_out'], '%Y-%m-%d') - datetime.datetime.strptime(response.meta['check_in'], '%Y-%m-%d')).days item['total_price']=item['price_per_night'] * nights else : # Estimate total nights=(datetime.datetime.strptime(response.meta['check_out'], '%Y-%m-%d') - datetime.datetime.strptime(response.meta['check_in'], '%Y-%m-%d')).days item['total_price']=item['price_per_night'] * nights # Extract images # For demo purposes using placeholder images item['main_image']='https://via.placeholder.com/800x600.png?text=Airbnb+Listing' item['image_urls']=[ 'https://via.placeholder.com/800x600.png?text=Image+1', 'https://via.placeholder.com/800x600.png?text=Image+2', 'https://via.placeholder.com/800x600.png?text=Image+3'] # Extract ratings and reviews rating_text=response.css('span[data-testid="rating-value"]::text').get() reviews_text=response.css('span[data-testid="reviews-count"]::text').get() if rating_text : try : item['ratings']=float(rating_text) except ValueError : item['ratings']=None else : item['ratings']=None if reviews_text : # Extract number from "123 reviews" reviews_match=re.search(r'(\d+)', reviews_text) if reviews_match : item['number_of_reviews']=int(reviews_match.group(1)) else : item['number_of_reviews']=0 else : item['number_of_reviews']=0 # Extract description description=response.css('div[data-section-id="DESCRIPTION_DEFAULT"] span::text').getall() item['description']=' '.join(description) if description else None # Extract amenities amenities=response.css('div[data-section-id="AMENITIES_DEFAULT"] div[data-testid="amenity-row"] div::text').getall() item['amenities']=amenities if amenities else [] # Extract property type property_type=response.css('div[data-section-id="OVERVIEW_DEFAULT"] div[data-testid="home-type"]::text').get() item['property_type']=property_type if property_type else "Entire rental unit" # Extract host information host_name=response.css('div[data-section-id="HOST_PROFILE_DEFAULT"] h2::text').get() host_superhost=bool(response.css('div[data-section-id="HOST_PROFILE_DEFAULT"] [data-testid="superhost-badge"]')) # More placeholders for host item['host']= {
+    'name': host_name if host_name else "Airbnb Host", 'profile_pic': 'https://via.placeholder.com/100x100.png?text=Host', 'superhost': host_superhost, 'response_rate': 95, 'response_time': "within an hour"
+}
+
+# Send data to Django API self.send_to_api(dict(item)) yield item def send_to_api(self, data) : """Send the scraped data to Django API""" headers= {
+    'Content-Type': 'application/json'
+}
+
+try : response=requests.post(self.api_endpoint, json=data, headers=headers) if response.status_code==201 : self.logger.info(f"Successfully added listing: {data['title']}") else : self.logger.error(f"Failed to add listing: {response.status_code} - {response.text}") except Exception as e : self.logger.error(f"Error sending data to API: {str(e)}") # run.py - Script to run the spider from command line with parameters """
+ Script to run the Airbnb spider with parameters """
+ import argparse import sys from scrapy.crawler import CrawlerProcess from scrapy.utils.project import get_project_settings from airbnb_scraper.spiders.airbnb import AirbnbSpider def main() : parser=argparse.ArgumentParser(description='Run Airbnb scraper') parser.add_argument('--location', type=str, default='New York', help='Location to search') parser.add_argument('--check-in', type=str, help='Check-in date (YYYY-MM-DD)') parser.add_argument('--check-out', type=str, help='Check-out date (YYYY-MM-DD)') parser.add_argument('--guests', type=int, default=2, help='Number of guests') args=parser.parse_args() process=CrawlerProcess(get_project_settings()) process.crawl(AirbnbSpider, location=args.location, check_in=args.check_in, check_out=args.check_out, guests=args.guests) process.start() if __name__=='__main__' : main() # To run the spider with parameters: # python run.py --location "Paris" --check-in "2025-06-01" --check-out "2025-06-08" --guests 2
